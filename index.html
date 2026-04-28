@@ -14,13 +14,13 @@
 
   // ▼▼▼ REEMPLAZÁ CON TUS DATOS DE FIREBASE ▼▼▼
   const firebaseConfig = {
-     apiKey: "AIzaSyC9cCrO4Git9aEEe0CtMQcvJHuiI1x0K7w",
-  authDomain: "stock-granos-campo.firebaseapp.com",
-  databaseURL: "https://stock-granos-campo-default-rtdb.firebaseio.com",
-  projectId: "stock-granos-campo",
-  storageBucket: "stock-granos-campo.firebasestorage.app",
-  messagingSenderId: "400354753690",
-  appId: "1:400354753690:web:a8ae7b3bc6ffe94217b323"
+    apiKey:            "TU_API_KEY",
+    authDomain:        "TU_PROYECTO.firebaseapp.com",
+    databaseURL:       "https://TU_PROYECTO-default-rtdb.firebaseio.com",
+    projectId:         "TU_PROYECTO",
+    storageBucket:     "TU_PROYECTO.appspot.com",
+    messagingSenderId: "TU_SENDER_ID",
+    appId:             "TU_APP_ID"
   };
   // ▲▲▲ FIN ▲▲▲
 
@@ -270,6 +270,9 @@ hr.div{border:none;border-top:1px solid var(--border);margin:1.2rem 0}
   <button class="tab-btn"        onclick="showTab('p-filtros')">Filtros</button>
   <button class="tab-btn"        onclick="showTab('resumen')">Resumen</button>
   <button class="tab-btn inv-tab" onclick="showTab('inversion')">📊 Inversión Scania</button>
+  <button id="btn-guardar-manual" onclick="guardarManual()" style="margin-left:auto;margin-right:8px;align-self:center;padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:.78rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;white-space:nowrap;transition:background .15s" onmouseover="this.style.background='var(--accent-h)'" onmouseout="this.style.background='var(--accent)'">
+    ☁️ Guardar
+  </button>
 </div>
 
 <main>
@@ -633,9 +636,11 @@ function recalc(){
   filtros.forEach(f=>{f.i=km>0&&f.vu>0?Math.round(f.pr*f.cant/f.vu*km):0;});
   renderAll(km,totalTn);
   renderInversion();
-  // Guardar automáticamente con debounce (espera 1 seg tras el último cambio)
-  clearTimeout(window._saveTimer);
-  window._saveTimer = setTimeout(guardarEstado, 1000);
+  // Guardado automático con debounce — SOLO si no estamos en medio de una carga
+  if(!_cargando){
+    clearTimeout(window._saveTimer);
+    window._saveTimer = setTimeout(guardarEstado, 1000);
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -936,9 +941,14 @@ function verificarSesion(){
 
 /* ══════════════════════════════════════════════════════
    PERSISTENCIA — Firebase + localStorage
+   
+   REGLA CLAVE: recalc() tiene un flag _cargando que evita
+   que al restaurar datos dispare un guardado automático
+   y sobreescriba los datos recién cargados.
 ══════════════════════════════════════════════════════ */
+let _cargando = false; // flag para bloquear guardado durante carga
+
 function obtenerEstado(){
-  // Capturar todos los inputs con id
   const inputs = {};
   document.querySelectorAll('input[id], select[id]').forEach(el=>{
     inputs[el.id] = el.value;
@@ -947,58 +957,76 @@ function obtenerEstado(){
 }
 
 function guardarEstado(){
+  if(_cargando) return; // NUNCA guardar mientras se están cargando datos
   const estado = obtenerEstado();
-  // localStorage
   try { localStorage.setItem('cc_estado', JSON.stringify(estado)); } catch(e){}
-  // Firebase
   if(window._firebaseReady && window._fbSet){
     window._fbSet('costos_camion', estado)
       .then(()=> mostrarGuardado('☁️ Guardado en la nube'))
-      .catch(()=> mostrarGuardado('💾 Guardado local'));
+      .catch(()=> mostrarGuardado('💾 Guardado local (sin conexión)'));
   } else {
     mostrarGuardado('💾 Guardado local');
   }
 }
 
-function cargarEstado(){
-  const restaurar = d => {
-    if(!d) return;
+function guardarManual(){
+  // Botón manual: guardar inmediatamente sin debounce
+  clearTimeout(window._saveTimer);
+  guardarEstado();
+}
+
+function restaurarDatos(d){
+  if(!d) return;
+  _cargando = true; // activar flag: bloquea guardarEstado
+  try {
     if(d.fijos)   fijos   = d.fijos;
     if(d.vars)    vars    = d.vars;
     if(d.aceites) aceites = d.aceites;
     if(d.filtros) filtros = d.filtros;
-    // Restaurar inputs
+    // Restaurar inputs ANTES de recalc
     if(d.inputs){
       Object.entries(d.inputs).forEach(([id, val])=>{
         const el = document.getElementById(id);
         if(el) el.value = val;
       });
     }
-    recalc();
-  };
+    recalc(); // recalcula con los datos restaurados (NO guarda porque _cargando=true)
+  } finally {
+    _cargando = false; // desactivar flag cuando termina
+  }
+}
 
+function cargarEstado(){
   if(window._firebaseReady && window._fbGet){
     window._fbGet('costos_camion').then(snap=>{
       const d = snap.val();
-      if(d){ restaurar(d); mostrarGuardado('✅ Datos sincronizados'); }
-      else {
-        // Firebase vacío → migrar desde localStorage
-        try { const loc = localStorage.getItem('cc_estado'); if(loc){ restaurar(JSON.parse(loc)); guardarEstado(); } } catch(e){}
+      if(d){
+        restaurarDatos(d);
+        mostrarGuardado('✅ Datos cargados desde la nube');
+      } else {
+        // Firebase vacío → intentar localStorage
+        _cargarDesdeLocal();
       }
     }).catch(()=>{
-      try { const loc = localStorage.getItem('cc_estado'); if(loc) restaurar(JSON.parse(loc)); } catch(e){}
+      _cargarDesdeLocal();
+      mostrarGuardado('📴 Sin conexión — datos locales');
     });
   } else {
-    // Esperar Firebase hasta 3 seg
-    let n=0;
+    // Firebase aún no listo → esperar hasta 3 segundos
+    let n = 0;
     const t = setInterval(()=>{
       n++;
       if(window._firebaseReady){ clearInterval(t); cargarEstado(); }
-      else if(n>30){ clearInterval(t);
-        try { const loc = localStorage.getItem('cc_estado'); if(loc) restaurar(JSON.parse(loc)); } catch(e){}
-      }
+      else if(n > 30){ clearInterval(t); _cargarDesdeLocal(); }
     }, 100);
   }
+}
+
+function _cargarDesdeLocal(){
+  try {
+    const loc = localStorage.getItem('cc_estado');
+    if(loc) restaurarDatos(JSON.parse(loc));
+  } catch(e){}
 }
 
 let _toastTimer;
