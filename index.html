@@ -943,22 +943,42 @@ function verificarSesion(){
 /* ══════════════════════════════════════════════════════
    PERSISTENCIA — Firebase + localStorage
    
-   REGLA CLAVE: recalc() tiene un flag _cargando que evita
-   que al restaurar datos dispare un guardado automático
-   y sobreescriba los datos recién cargados.
+   LÓGICA CORRECTA:
+   - Guardar: captura fijos/vars/aceites/filtros + params (inputs con id)
+   - Restaurar: primero carga las variables JS, luego los params,
+     y llama recalcSueldo() UNA SOLA VEZ al final con _cargando=true
+     para que no dispare un guardado automático
 ══════════════════════════════════════════════════════ */
-let _cargando = false; // flag para bloquear guardado durante carga
+let _cargando = false;
+
+// IDs de todos los parámetros numéricos que hay que guardar/restaurar
+const PARAM_IDS = [
+  'p-km','p-viajes','p-tn','p-tarifa','p-repuestos',
+  'vu-del','vu-trac','vu-acop',
+  'pr-del','pr-trac','pr-acop',
+  'q-del','q-trac','q-acop',
+  'cons-gasoil','pr-gasoil',
+  'inv-precio','inv-enganche','inv-plazo','inv-tna','inv-tc'
+];
 
 function obtenerEstado(){
-  const inputs = {};
-  document.querySelectorAll('input[id], select[id]').forEach(el=>{
-    inputs[el.id] = el.value;
+  const params = {};
+  PARAM_IDS.forEach(id => {
+    const el = document.getElementById(id);
+    if(el) params[id] = el.value;
   });
-  return { fijos, vars, aceites, filtros, inputs, ts: new Date().toISOString() };
+  return {
+    fijos:   JSON.parse(JSON.stringify(fijos)),
+    vars:    JSON.parse(JSON.stringify(vars)),
+    aceites: JSON.parse(JSON.stringify(aceites)),
+    filtros: JSON.parse(JSON.stringify(filtros)),
+    params,
+    ts: new Date().toISOString()
+  };
 }
 
 function guardarEstado(){
-  if(_cargando) return; // NUNCA guardar mientras se están cargando datos
+  if(_cargando) return;
   const estado = obtenerEstado();
   try { localStorage.setItem('cc_estado', JSON.stringify(estado)); } catch(e){}
   if(window._firebaseReady && window._fbSet){
@@ -971,51 +991,60 @@ function guardarEstado(){
 }
 
 function guardarManual(){
-  // Botón manual: guardar inmediatamente sin debounce
   clearTimeout(window._saveTimer);
   guardarEstado();
 }
 
 function restaurarDatos(d){
   if(!d) return;
-  _cargando = true; // activar flag: bloquea guardarEstado
+  _cargando = true;
   try {
-    if(d.fijos)   fijos   = d.fijos;
-    if(d.vars)    vars    = d.vars;
-    if(d.aceites) aceites = d.aceites;
-    if(d.filtros) filtros = d.filtros;
-    // Restaurar inputs ANTES de recalc
-    if(d.inputs){
-      Object.entries(d.inputs).forEach(([id, val])=>{
+    // 1) Restaurar variables JS
+    if(d.fijos   && d.fijos.length)   fijos   = d.fijos;
+    if(d.vars    && d.vars.length)     vars    = d.vars;
+    if(d.aceites && d.aceites.length)  aceites = d.aceites;
+    if(d.filtros && d.filtros.length)  filtros = d.filtros;
+
+    // 2) Restaurar parámetros en el DOM ANTES de recalcular
+    if(d.params){
+      Object.entries(d.params).forEach(([id, val]) => {
         const el = document.getElementById(id);
         if(el) el.value = val;
       });
     }
-    recalc(); // recalcula con los datos restaurados (NO guarda porque _cargando=true)
+    // soporte legado: si venía con "inputs" en lugar de "params"
+    if(d.inputs && !d.params){
+      Object.entries(d.inputs).forEach(([id, val]) => {
+        const el = document.getElementById(id);
+        if(el) el.value = val;
+      });
+    }
+
+    // 3) Recalcular UNA sola vez con los datos ya restaurados
+    recalcSueldo();
+
   } finally {
-    _cargando = false; // desactivar flag cuando termina
+    _cargando = false;
   }
 }
 
 function cargarEstado(){
   if(window._firebaseReady && window._fbGet){
-    window._fbGet('costos_camion').then(snap=>{
+    window._fbGet('costos_camion').then(snap => {
       const d = snap.val();
       if(d){
         restaurarDatos(d);
         mostrarGuardado('✅ Datos cargados desde la nube');
       } else {
-        // Firebase vacío → intentar localStorage
         _cargarDesdeLocal();
       }
-    }).catch(()=>{
+    }).catch(() => {
       _cargarDesdeLocal();
       mostrarGuardado('📴 Sin conexión — datos locales');
     });
   } else {
-    // Firebase aún no listo → esperar hasta 3 segundos
     let n = 0;
-    const t = setInterval(()=>{
+    const t = setInterval(() => {
       n++;
       if(window._firebaseReady){ clearInterval(t); cargarEstado(); }
       else if(n > 30){ clearInterval(t); _cargarDesdeLocal(); }
@@ -1049,8 +1078,7 @@ function mostrarGuardado(msg){
    INICIO
 ══════════════════════════════════════════════════════ */
 verificarSesion();
-cargarEstado();
-recalcSueldo();
+cargarEstado(); // ya llama recalcSueldo() internamente al restaurar
 </script>
 </body>
 </html>
